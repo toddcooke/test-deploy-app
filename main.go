@@ -280,3 +280,4 @@ func s3TestButton(connected bool) string {
 	}
 	return `<a href="/s3-test" class="btn">Run S3 Test</a>`
 }
+// S3 test Thu Jan  8 12:30:37 EST 2026

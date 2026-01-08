@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/redis/go-redis/v9"
 )
 
 var startTime = time.Now()
@@ -38,11 +40,133 @@ func getS3Client() (*s3.S3, error) {
 	return s3.New(sess), nil
 }
 
+func getRedisClient() (*redis.Client, error) {
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		return nil, fmt.Errorf("REDIS_URL not configured")
+	}
+
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse REDIS_URL: %w", err)
+	}
+
+	return redis.NewClient(opts), nil
+}
+
 func main() {
 	// Health check endpoint
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
+	})
+
+	// Redis Test endpoint
+	http.HandleFunc("/redis-test", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		ctx := context.Background()
+
+		client, err := getRedisClient()
+		if err != nil {
+			fmt.Fprintf(w, "<h1>Redis Test Failed</h1><p>Error: %s</p><p><a href=\"/\">Back</a></p>", err)
+			return
+		}
+		defer client.Close()
+
+		var results []string
+
+		// 1. PING test
+		pong, err := client.Ping(ctx).Result()
+		if err != nil {
+			results = append(results, fmt.Sprintf("PING FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("PING SUCCESS: %s", pong))
+		}
+
+		// 2. SET test
+		testKey := fmt.Sprintf("test-key-%d", time.Now().Unix())
+		testValue := fmt.Sprintf("Hello from Container Platform! Time: %s", time.Now().Format(time.RFC3339))
+		err = client.Set(ctx, testKey, testValue, 60*time.Second).Err()
+		if err != nil {
+			results = append(results, fmt.Sprintf("SET FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("SET SUCCESS: %s", testKey))
+		}
+
+		// 3. GET test
+		val, err := client.Get(ctx, testKey).Result()
+		if err != nil {
+			results = append(results, fmt.Sprintf("GET FAILED: %s", err))
+		} else if val == testValue {
+			results = append(results, "GET SUCCESS: Value verified")
+		} else {
+			results = append(results, "GET FAILED: Value mismatch")
+		}
+
+		// 4. INCR test
+		counterKey := "visit-counter"
+		count, err := client.Incr(ctx, counterKey).Result()
+		if err != nil {
+			results = append(results, fmt.Sprintf("INCR FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("INCR SUCCESS: Counter = %d", count))
+		}
+
+		// 5. DELETE test key (cleanup)
+		err = client.Del(ctx, testKey).Err()
+		if err != nil {
+			results = append(results, fmt.Sprintf("DEL FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("DEL SUCCESS: %s", testKey))
+		}
+
+		// Get Redis info
+		info, _ := client.Info(ctx, "server").Result()
+		redisVersion := "unknown"
+		for _, line := range strings.Split(info, "\n") {
+			if strings.HasPrefix(line, "redis_version:") {
+				redisVersion = strings.TrimPrefix(line, "redis_version:")
+				redisVersion = strings.TrimSpace(redisVersion)
+				break
+			}
+		}
+
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Redis Test Results</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+        .success { color: #22c55e; }
+        .failed { color: #ef4444; }
+        .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h1>Redis Test Results</h1>
+    <div class="card">
+        <p><strong>Redis Version:</strong> <code>%s</code></p>
+        <p><strong>Visit Counter:</strong> <code>%d</code></p>
+    </div>
+    <div class="card">
+        <h2>Operations</h2>
+        <ul>
+`, redisVersion, count)
+
+		for _, result := range results {
+			class := "success"
+			if strings.Contains(result, "FAILED") {
+				class = "failed"
+			}
+			fmt.Fprintf(w, `            <li class="%s">%s</li>`+"\n", class, result)
+		}
+
+		fmt.Fprintf(w, `        </ul>
+    </div>
+    <p><a href="/">Back to main page</a></p>
+</body>
+</html>`)
 	})
 
 	// S3 Test endpoint - uploads, downloads, and lists objects
@@ -196,8 +320,10 @@ func main() {
         .status { font-weight: bold; }
         .connected { color: #22c55e; }
         .disconnected { color: #999; }
-        .btn { display: inline-block; background: #3b82f6; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; margin-top: 10px; }
+        .btn { display: inline-block; background: #3b82f6; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; margin-top: 10px; margin-right: 10px; }
         .btn:hover { background: #2563eb; }
+        .btn-redis { background: #dc2626; }
+        .btn-redis:hover { background: #b91c1c; }
     </style>
 </head>
 <body>
@@ -220,6 +346,7 @@ func main() {
         <h2>Managed Services</h2>
         <p><strong>Redis:</strong> <span class="status %s">%s</span></p>
         %s
+        %s
         <p><strong>Object Storage (S3):</strong> <span class="status %s">%s</span></p>
         %s
         %s
@@ -229,6 +356,7 @@ func main() {
 			greeting, hostname, uptime, time.Now().Format(time.RFC3339), greeting, secretValue != "",
 			statusClass(redisConnected), statusText(redisConnected),
 			redisDetails(redisConnected, redisMasked),
+			redisTestButton(redisConnected),
 			statusClass(storageConnected), statusText(storageConnected),
 			storageDetails(storageConnected, s3Endpoint, s3Bucket),
 			s3TestButton(storageConnected),
@@ -241,6 +369,7 @@ func main() {
 	}
 	fmt.Printf("Server starting on port %s\n", port)
 	fmt.Printf("Health check available at /health\n")
+	fmt.Printf("Redis test available at /redis-test\n")
 	fmt.Printf("S3 test available at /s3-test\n")
 	http.ListenAndServe(":"+port, nil)
 }
@@ -266,6 +395,13 @@ func redisDetails(connected bool, maskedURL string) string {
 	return fmt.Sprintf(`<p style="margin-left: 20px;"><code>%s</code></p>`, maskedURL)
 }
 
+func redisTestButton(connected bool) string {
+	if !connected {
+		return ""
+	}
+	return `<a href="/redis-test" class="btn btn-redis">Run Redis Test</a>`
+}
+
 func storageDetails(connected bool, endpoint, bucket string) string {
 	if !connected {
 		return ""
@@ -280,4 +416,3 @@ func s3TestButton(connected bool) string {
 	}
 	return `<a href="/s3-test" class="btn">Run S3 Test</a>`
 }
-// S3 test Thu Jan  8 12:30:37 EST 2026

@@ -1,20 +1,157 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 )
 
 var startTime = time.Now()
 
+func getS3Client() (*s3.S3, error) {
+	accessKey := os.Getenv("S3_ACCESS_KEY_ID")
+	secretKey := os.Getenv("S3_SECRET_ACCESS_KEY")
+	endpoint := os.Getenv("S3_ENDPOINT_URL")
+
+	if accessKey == "" || secretKey == "" || endpoint == "" {
+		return nil, fmt.Errorf("S3 credentials not configured")
+	}
+
+	sess, err := session.NewSession(&aws.Config{
+		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, ""),
+		Endpoint:         aws.String(endpoint),
+		Region:           aws.String("auto"),
+		S3ForcePathStyle: aws.Bool(true),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s3.New(sess), nil
+}
+
 func main() {
-	// Health check endpoint (for Kubernetes probes)
+	// Health check endpoint
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
+	})
+
+	// S3 Test endpoint - uploads, downloads, and lists objects
+	http.HandleFunc("/s3-test", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+
+		client, err := getS3Client()
+		if err != nil {
+			fmt.Fprintf(w, "<h1>S3 Test Failed</h1><p>Error: %s</p>", err)
+			return
+		}
+
+		bucket := os.Getenv("S3_BUCKET_NAME")
+		testKey := fmt.Sprintf("test-%d.txt", time.Now().Unix())
+		testContent := fmt.Sprintf("Hello from Container Platform! Time: %s", time.Now().Format(time.RFC3339))
+
+		var results []string
+
+		// 1. Upload test object
+		_, err = client.PutObject(&s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(testKey),
+			Body:   bytes.NewReader([]byte(testContent)),
+		})
+		if err != nil {
+			results = append(results, fmt.Sprintf("Upload FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("Upload SUCCESS: %s", testKey))
+		}
+
+		// 2. Download and verify
+		getResp, err := client.GetObject(&s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(testKey),
+		})
+		if err != nil {
+			results = append(results, fmt.Sprintf("Download FAILED: %s", err))
+		} else {
+			body, _ := io.ReadAll(getResp.Body)
+			getResp.Body.Close()
+			if string(body) == testContent {
+				results = append(results, "Download SUCCESS: Content verified")
+			} else {
+				results = append(results, "Download FAILED: Content mismatch")
+			}
+		}
+
+		// 3. List objects
+		listResp, err := client.ListObjectsV2(&s3.ListObjectsV2Input{
+			Bucket:  aws.String(bucket),
+			MaxKeys: aws.Int64(10),
+		})
+		if err != nil {
+			results = append(results, fmt.Sprintf("List FAILED: %s", err))
+		} else {
+			var keys []string
+			for _, obj := range listResp.Contents {
+				keys = append(keys, *obj.Key)
+			}
+			results = append(results, fmt.Sprintf("List SUCCESS: %d objects [%s]", len(keys), strings.Join(keys, ", ")))
+		}
+
+		// 4. Delete test object (cleanup)
+		_, err = client.DeleteObject(&s3.DeleteObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(testKey),
+		})
+		if err != nil {
+			results = append(results, fmt.Sprintf("Delete FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("Delete SUCCESS: %s", testKey))
+		}
+
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>S3 Test Results</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+        .success { color: #22c55e; }
+        .failed { color: #ef4444; }
+        .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h1>S3 Bucket Test Results</h1>
+    <div class="card">
+        <p><strong>Bucket:</strong> <code>%s</code></p>
+        <p><strong>Endpoint:</strong> <code>%s</code></p>
+    </div>
+    <div class="card">
+        <h2>Operations</h2>
+        <ul>
+`, bucket, os.Getenv("S3_ENDPOINT_URL"))
+
+		for _, result := range results {
+			class := "success"
+			if strings.Contains(result, "FAILED") {
+				class = "failed"
+			}
+			fmt.Fprintf(w, `            <li class="%s">%s</li>`+"\n", class, result)
+		}
+
+		fmt.Fprintf(w, `        </ul>
+    </div>
+    <p><a href="/">Back to main page</a></p>
+</body>
+</html>`)
 	})
 
 	// Main page
@@ -32,7 +169,6 @@ func main() {
 		redisConnected := redisURL != ""
 		redisMasked := ""
 		if redisConnected {
-			// Mask the password in the URL
 			parts := strings.Split(redisURL, "@")
 			if len(parts) == 2 {
 				redisMasked = "rediss://***@" + parts[1]
@@ -60,6 +196,8 @@ func main() {
         .status { font-weight: bold; }
         .connected { color: #22c55e; }
         .disconnected { color: #999; }
+        .btn { display: inline-block; background: #3b82f6; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; margin-top: 10px; }
+        .btn:hover { background: #2563eb; }
     </style>
 </head>
 <body>
@@ -84,18 +222,7 @@ func main() {
         %s
         <p><strong>Object Storage (S3):</strong> <span class="status %s">%s</span></p>
         %s
-    </div>
-
-    <div class="card">
-        <h2>Features Demo</h2>
-        <p>This app demonstrates Container Platform features:</p>
-        <ul>
-            <li><strong>Managed Redis:</strong> Link via repo settings, auto-inject REDIS_URL</li>
-            <li><strong>Object Storage:</strong> Link via repo settings, auto-inject S3_* vars</li>
-            <li><strong>Background Workers:</strong> Add a worker with command <code>./worker</code></li>
-            <li><strong>Scale to Zero:</strong> Enable in settings, app sleeps when idle</li>
-            <li><strong>Health Checks:</strong> Configured at <code>/health</code></li>
-        </ul>
+        %s
     </div>
 </body>
 </html>`,
@@ -104,6 +231,7 @@ func main() {
 			redisDetails(redisConnected, redisMasked),
 			statusClass(storageConnected), statusText(storageConnected),
 			storageDetails(storageConnected, s3Endpoint, s3Bucket),
+			s3TestButton(storageConnected),
 		)
 	})
 
@@ -113,6 +241,7 @@ func main() {
 	}
 	fmt.Printf("Server starting on port %s\n", port)
 	fmt.Printf("Health check available at /health\n")
+	fmt.Printf("S3 test available at /s3-test\n")
 	http.ListenAndServe(":"+port, nil)
 }
 
@@ -143,4 +272,11 @@ func storageDetails(connected bool, endpoint, bucket string) string {
 	}
 	return fmt.Sprintf(`<p style="margin-left: 20px;">Endpoint: <code>%s</code></p>
         <p style="margin-left: 20px;">Bucket: <code>%s</code></p>`, endpoint, bucket)
+}
+
+func s3TestButton(connected bool) string {
+	if !connected {
+		return ""
+	}
+	return `<a href="/s3-test" class="btn">Run S3 Test</a>`
 }

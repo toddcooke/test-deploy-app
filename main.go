@@ -22,6 +22,10 @@ var startTime = time.Now()
 func getS3Client() (*s3.S3, error) {
 	accessKey := os.Getenv("S3_ACCESS_KEY_ID")
 	secretKey := os.Getenv("S3_SECRET_ACCESS_KEY")
+	sessionToken := os.Getenv("S3_SESSION_TOKEN")
+	if sessionToken == "" {
+		sessionToken = os.Getenv("AWS_SESSION_TOKEN")
+	}
 	endpoint := os.Getenv("S3_ENDPOINT_URL")
 
 	if accessKey == "" || secretKey == "" || endpoint == "" {
@@ -29,7 +33,7 @@ func getS3Client() (*s3.S3, error) {
 	}
 
 	sess, err := session.NewSession(&aws.Config{
-		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, ""),
+		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, sessionToken),
 		Endpoint:         aws.String(endpoint),
 		Region:           aws.String("auto"),
 		S3ForcePathStyle: aws.Bool(true),

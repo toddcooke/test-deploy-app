@@ -278,6 +278,123 @@ func main() {
 </html>`)
 	})
 
+	// Environment Variables endpoint - shows all env vars for debugging injection
+	http.HandleFunc("/env", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+
+		// Categorize environment variables
+		platformVars := []struct{ key, value string }{}
+		s3Vars := []struct{ key, value string }{}
+		redisVars := []struct{ key, value string }{}
+		dbVars := []struct{ key, value string }{}
+		userVars := []struct{ key, value string }{}
+		systemVars := []struct{ key, value string }{}
+
+		for _, env := range os.Environ() {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key, value := parts[0], parts[1]
+
+			// Mask sensitive values
+			displayValue := value
+			if strings.Contains(strings.ToLower(key), "secret") ||
+				strings.Contains(strings.ToLower(key), "password") ||
+				strings.Contains(strings.ToLower(key), "key") ||
+				strings.Contains(strings.ToLower(key), "token") {
+				if len(value) > 8 {
+					displayValue = value[:4] + "****" + value[len(value)-4:]
+				} else if len(value) > 0 {
+					displayValue = "****"
+				}
+			}
+
+			entry := struct{ key, value string }{key, displayValue}
+
+			// Categorize
+			switch {
+			case strings.HasPrefix(key, "S3_"):
+				s3Vars = append(s3Vars, entry)
+			case strings.HasPrefix(key, "REDIS_"):
+				redisVars = append(redisVars, entry)
+			case strings.HasPrefix(key, "DATABASE_") || strings.HasPrefix(key, "DB_") || strings.HasPrefix(key, "POSTGRES_"):
+				dbVars = append(dbVars, entry)
+			case key == "PORT" || key == "GREETING" || key == "SECRET_VALUE" || key == "APP_NAME":
+				userVars = append(userVars, entry)
+			case key == "KUBERNETES_SERVICE_HOST" || key == "KUBERNETES_PORT" ||
+				strings.HasPrefix(key, "HOSTNAME") || key == "HOME" || key == "PATH":
+				systemVars = append(systemVars, entry)
+			default:
+				if strings.HasPrefix(key, "CP_") || strings.HasPrefix(key, "PLATFORM_") {
+					platformVars = append(platformVars, entry)
+				} else {
+					systemVars = append(systemVars, entry)
+				}
+			}
+		}
+
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Environment Variables - Test App</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 50px auto; padding: 20px; }
+        h1 { color: #333; }
+        h2 { color: #666; border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+        .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        table { width: 100%%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #e0e0e0; }
+        th { background: #e8e8e8; font-weight: 600; }
+        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+        .empty { color: #999; font-style: italic; }
+        .injected { background: #dcfce7; }
+        a { color: #3b82f6; }
+    </style>
+</head>
+<body>
+    <h1>Environment Variables</h1>
+    <p>This page shows all environment variables to help debug injection behavior.</p>
+    <p><a href="/">Back to main page</a></p>
+`)
+
+		renderSection := func(title string, vars []struct{ key, value string }, highlight bool) {
+			fmt.Fprintf(w, `    <div class="card">
+        <h2>%s</h2>
+`, title)
+			if len(vars) == 0 {
+				fmt.Fprintf(w, `        <p class="empty">No variables in this category</p>
+`)
+			} else {
+				fmt.Fprintf(w, `        <table>
+            <tr><th>Variable</th><th>Value</th></tr>
+`)
+				for _, v := range vars {
+					rowClass := ""
+					if highlight {
+						rowClass = ` class="injected"`
+					}
+					fmt.Fprintf(w, `            <tr%s><td><code>%s</code></td><td><code>%s</code></td></tr>
+`, rowClass, v.key, v.value)
+				}
+				fmt.Fprintf(w, `        </table>
+`)
+			}
+			fmt.Fprintf(w, `    </div>
+`)
+		}
+
+		renderSection("S3 Storage Variables (Injected)", s3Vars, true)
+		renderSection("Redis Variables (Injected)", redisVars, true)
+		renderSection("Database Variables (Injected)", dbVars, true)
+		renderSection("Platform Variables", platformVars, false)
+		renderSection("User-Defined Variables", userVars, false)
+		renderSection("System Variables", systemVars, false)
+
+		fmt.Fprintf(w, `</body>
+</html>`)
+	})
+
 	// Main page
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		greeting := os.Getenv("GREETING")
@@ -343,6 +460,11 @@ func main() {
     </div>
 
     <div class="card">
+        <h2>Debug</h2>
+        <a href="/env" class="btn">View All Environment Variables</a>
+    </div>
+
+    <div class="card">
         <h2>Managed Services</h2>
         <p><strong>Redis:</strong> <span class="status %s">%s</span></p>
         %s
@@ -369,6 +491,7 @@ func main() {
 	}
 	fmt.Printf("Server starting on port %s\n", port)
 	fmt.Printf("Health check available at /health\n")
+	fmt.Printf("Environment variables at /env\n")
 	fmt.Printf("Redis test available at /redis-test\n")
 	fmt.Printf("S3 test available at /s3-test\n")
 	http.ListenAndServe(":"+port, nil)

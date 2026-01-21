@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -56,6 +57,20 @@ func getRedisClient() (*redis.Client, error) {
 	}
 
 	return redis.NewClient(opts), nil
+}
+
+func getDBConnection(ctx context.Context) (*pgx.Conn, error) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL not configured")
+	}
+
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	return conn, nil
 }
 
 func main() {
@@ -157,6 +172,128 @@ func main() {
         <h2>Operations</h2>
         <ul>
 `, redisVersion, count)
+
+		for _, result := range results {
+			class := "success"
+			if strings.Contains(result, "FAILED") {
+				class = "failed"
+			}
+			fmt.Fprintf(w, `            <li class="%s">%s</li>`+"\n", class, result)
+		}
+
+		fmt.Fprintf(w, `        </ul>
+    </div>
+    <p><a href="/">Back to main page</a></p>
+</body>
+</html>`)
+	})
+
+	// Database Test endpoint - connects and runs queries
+	http.HandleFunc("/db-test", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		ctx := context.Background()
+
+		conn, err := getDBConnection(ctx)
+		if err != nil {
+			fmt.Fprintf(w, "<h1>Database Test Failed</h1><p>Error: %s</p><p><a href=\"/\">Back</a></p>", err)
+			return
+		}
+		defer conn.Close(ctx)
+
+		var results []string
+
+		// 1. Connection test - get PostgreSQL version
+		var pgVersion string
+		err = conn.QueryRow(ctx, "SELECT version()").Scan(&pgVersion)
+		if err != nil {
+			results = append(results, fmt.Sprintf("VERSION FAILED: %s", err))
+			pgVersion = "unknown"
+		} else {
+			// Truncate version for display
+			if len(pgVersion) > 60 {
+				pgVersion = pgVersion[:60] + "..."
+			}
+			results = append(results, "VERSION SUCCESS: Connected to PostgreSQL")
+		}
+
+		// 2. Create test table
+		_, err = conn.Exec(ctx, `
+			CREATE TABLE IF NOT EXISTS test_deploy_app (
+				id SERIAL PRIMARY KEY,
+				key TEXT UNIQUE NOT NULL,
+				value TEXT,
+				created_at TIMESTAMP DEFAULT NOW()
+			)
+		`)
+		if err != nil {
+			results = append(results, fmt.Sprintf("CREATE TABLE FAILED: %s", err))
+		} else {
+			results = append(results, "CREATE TABLE SUCCESS: test_deploy_app")
+		}
+
+		// 3. Insert test row
+		testKey := fmt.Sprintf("test-key-%d", time.Now().Unix())
+		testValue := fmt.Sprintf("Hello from Container Platform! Time: %s", time.Now().Format(time.RFC3339))
+		_, err = conn.Exec(ctx, `
+			INSERT INTO test_deploy_app (key, value) VALUES ($1, $2)
+			ON CONFLICT (key) DO UPDATE SET value = $2
+		`, testKey, testValue)
+		if err != nil {
+			results = append(results, fmt.Sprintf("INSERT FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("INSERT SUCCESS: %s", testKey))
+		}
+
+		// 4. Select test row
+		var retrievedValue string
+		err = conn.QueryRow(ctx, "SELECT value FROM test_deploy_app WHERE key = $1", testKey).Scan(&retrievedValue)
+		if err != nil {
+			results = append(results, fmt.Sprintf("SELECT FAILED: %s", err))
+		} else if retrievedValue == testValue {
+			results = append(results, "SELECT SUCCESS: Value verified")
+		} else {
+			results = append(results, "SELECT FAILED: Value mismatch")
+		}
+
+		// 5. Count rows
+		var rowCount int
+		err = conn.QueryRow(ctx, "SELECT COUNT(*) FROM test_deploy_app").Scan(&rowCount)
+		if err != nil {
+			results = append(results, fmt.Sprintf("COUNT FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("COUNT SUCCESS: %d rows in table", rowCount))
+		}
+
+		// 6. Delete test row (cleanup)
+		_, err = conn.Exec(ctx, "DELETE FROM test_deploy_app WHERE key = $1", testKey)
+		if err != nil {
+			results = append(results, fmt.Sprintf("DELETE FAILED: %s", err))
+		} else {
+			results = append(results, fmt.Sprintf("DELETE SUCCESS: %s", testKey))
+		}
+
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Database Test Results</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+        .success { color: #22c55e; }
+        .failed { color: #ef4444; }
+        .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>Database Test Results</h1>
+    <div class="card">
+        <p><strong>PostgreSQL Version:</strong></p>
+        <p><code>%s</code></p>
+    </div>
+    <div class="card">
+        <h2>Operations</h2>
+        <ul>
+`, pgVersion)
 
 		for _, result := range results {
 			class := "success"
@@ -311,6 +448,20 @@ func main() {
 		s3Bucket := os.Getenv("S3_BUCKET_NAME")
 		storageConnected := s3AccessKey != "" && s3Endpoint != ""
 
+		// Check for Database
+		databaseURL := os.Getenv("DATABASE_URL")
+		dbConnected := databaseURL != ""
+		dbMasked := ""
+		if dbConnected {
+			// Mask the password in the URL
+			parts := strings.Split(databaseURL, "@")
+			if len(parts) == 2 {
+				dbMasked = "postgres://***@" + parts[1]
+			} else {
+				dbMasked = "[set]"
+			}
+		}
+
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
@@ -328,6 +479,8 @@ func main() {
         .btn:hover { background: #2563eb; }
         .btn-redis { background: #dc2626; }
         .btn-redis:hover { background: #b91c1c; }
+        .btn-db { background: #7c3aed; }
+        .btn-db:hover { background: #6d28d9; }
     </style>
 </head>
 <body>
@@ -348,6 +501,9 @@ func main() {
 
     <div class="card">
         <h2>Managed Services</h2>
+        <p><strong>Database (PostgreSQL):</strong> <span class="status %s">%s</span></p>
+        %s
+        %s
         <p><strong>Redis:</strong> <span class="status %s">%s</span></p>
         %s
         %s
@@ -358,6 +514,9 @@ func main() {
 </body>
 </html>`,
 			greeting, hostname, uptime, time.Now().Format(time.RFC3339), greeting, secretValue != "",
+			statusClass(dbConnected), statusText(dbConnected),
+			dbDetails(dbConnected, dbMasked),
+			dbTestButton(dbConnected),
 			statusClass(redisConnected), statusText(redisConnected),
 			redisDetails(redisConnected, redisMasked),
 			redisTestButton(redisConnected),
@@ -373,6 +532,7 @@ func main() {
 	}
 	fmt.Printf("Server starting on port %s\n", port)
 	fmt.Printf("Health check available at /health\n")
+	fmt.Printf("Database test available at /db-test\n")
 	fmt.Printf("Redis test available at /redis-test\n")
 	fmt.Printf("S3 test available at /s3-test\n")
 	http.ListenAndServe(":"+port, nil)
@@ -390,6 +550,20 @@ func statusText(connected bool) string {
 		return "Connected"
 	}
 	return "Not configured"
+}
+
+func dbDetails(connected bool, maskedURL string) string {
+	if !connected {
+		return ""
+	}
+	return fmt.Sprintf(`<p style="margin-left: 20px;"><code>%s</code></p>`, maskedURL)
+}
+
+func dbTestButton(connected bool) string {
+	if !connected {
+		return ""
+	}
+	return `<a href="/db-test" class="btn btn-db">Run DB Test</a>`
 }
 
 func redisDetails(connected bool, maskedURL string) string {

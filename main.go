@@ -20,6 +20,15 @@ import (
 
 var startTime = time.Now()
 
+// loggingMiddleware logs each incoming HTTP request
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		fmt.Printf("%s %s %s %v\n", r.Method, r.URL.Path, r.RemoteAddr, time.Since(start).Round(time.Microsecond))
+	})
+}
+
 func getS3Client() (*s3.S3, error) {
 	accessKey := os.Getenv("S3_ACCESS_KEY_ID")
 	secretKey := os.Getenv("S3_SECRET_ACCESS_KEY")
@@ -528,7 +537,7 @@ func main() {
 	fmt.Printf("Database test available at /db-test\n")
 	fmt.Printf("Redis test available at /redis-test\n")
 	fmt.Printf("S3 test available at /s3-test\n")
-	http.ListenAndServe(":"+port, nil)
+	http.ListenAndServe(":"+port, loggingMiddleware(http.DefaultServeMux))
 }
 
 func statusClass(connected bool) string {

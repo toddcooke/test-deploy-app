@@ -425,7 +425,6 @@ func main() {
 		if greeting == "" {
 			greeting = "Hello"
 		}
-		secretValue := os.Getenv("SECRET_VALUE")
 		hostname, _ := os.Hostname()
 		uptime := time.Since(startTime).Round(time.Second)
 
@@ -494,12 +493,6 @@ func main() {
     </div>
 
     <div class="card">
-        <h2>Environment Variables</h2>
-        <p><strong>GREETING:</strong> <code>%s</code></p>
-        <p><strong>SECRET_VALUE set:</strong> <code>%v</code></p>
-    </div>
-
-    <div class="card">
         <h2>Managed Services</h2>
         <p><strong>Database (PostgreSQL):</strong> <span class="status %s">%s</span></p>
         %s
@@ -513,7 +506,7 @@ func main() {
     </div>
 </body>
 </html>`,
-			greeting, hostname, uptime, time.Now().Format(time.RFC3339), greeting, secretValue != "",
+			greeting, hostname, uptime, time.Now().Format(time.RFC3339),
 			statusClass(dbConnected), statusText(dbConnected),
 			dbDetails(dbConnected, dbMasked),
 			dbTestButton(dbConnected),

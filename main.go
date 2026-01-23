@@ -152,10 +152,12 @@ func main() {
 			}
 		}
 
-		// 0c. TLS Handshake test
+		// 0c. TLS Handshake test (with SNI)
 		if host != "" && port != "" {
 			start := time.Now()
-			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", host+":"+port, &tls.Config{})
+			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", host+":"+port, &tls.Config{
+				ServerName: host, // SNI - required by some providers
+			})
 			elapsed := time.Since(start)
 			if err != nil {
 				results = append(results, fmt.Sprintf("TLS FAILED (%v): %s", elapsed, err))

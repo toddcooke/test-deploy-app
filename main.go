@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -65,6 +67,11 @@ func getRedisClient() (*redis.Client, error) {
 		return nil, fmt.Errorf("failed to parse REDIS_URL: %w", err)
 	}
 
+	// Increase timeouts for debugging
+	opts.DialTimeout = 30 * time.Second
+	opts.ReadTimeout = 30 * time.Second
+	opts.WriteTimeout = 30 * time.Second
+
 	return redis.NewClient(opts), nil
 }
 
@@ -108,14 +115,62 @@ func main() {
 			}
 		}
 
+		// Extract host:port for diagnostics
+		var host, port string
+		if idx := strings.Index(redisURL, "@"); idx != -1 {
+			hostPort := redisURL[idx+1:]
+			if colonIdx := strings.LastIndex(hostPort, ":"); colonIdx != -1 {
+				host = hostPort[:colonIdx]
+				port = hostPort[colonIdx+1:]
+			}
+		}
+
+		var results []string
+
+		// 0a. DNS Resolution test
+		if host != "" {
+			start := time.Now()
+			addrs, err := net.LookupHost(host)
+			elapsed := time.Since(start)
+			if err != nil {
+				results = append(results, fmt.Sprintf("DNS FAILED (%v): %s", elapsed, err))
+			} else {
+				results = append(results, fmt.Sprintf("DNS SUCCESS (%v): %s -> %v", elapsed, host, addrs))
+			}
+		}
+
+		// 0b. TCP Connection test (without TLS)
+		if host != "" && port != "" {
+			start := time.Now()
+			conn, err := net.DialTimeout("tcp", host+":"+port, 10*time.Second)
+			elapsed := time.Since(start)
+			if err != nil {
+				results = append(results, fmt.Sprintf("TCP FAILED (%v): %s", elapsed, err))
+			} else {
+				conn.Close()
+				results = append(results, fmt.Sprintf("TCP SUCCESS (%v): connected to %s:%s", elapsed, host, port))
+			}
+		}
+
+		// 0c. TLS Handshake test
+		if host != "" && port != "" {
+			start := time.Now()
+			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", host+":"+port, &tls.Config{})
+			elapsed := time.Since(start)
+			if err != nil {
+				results = append(results, fmt.Sprintf("TLS FAILED (%v): %s", elapsed, err))
+			} else {
+				conn.Close()
+				results = append(results, fmt.Sprintf("TLS SUCCESS (%v): handshake complete", elapsed))
+			}
+		}
+
 		client, err := getRedisClient()
 		if err != nil {
 			fmt.Fprintf(w, "<h1>Redis Test Failed</h1><p>Error: %s</p><p>URL: <code>%s</code></p><p><a href=\"/\">Back</a></p>", err, maskedURL)
 			return
 		}
 		defer client.Close()
-
-		var results []string
 
 		// 1. PING test
 		pong, err := client.Ping(ctx).Result()

@@ -94,9 +94,23 @@ func main() {
 		w.Header().Set("Content-Type", "text/html")
 		ctx := context.Background()
 
+		// Get and mask the Redis URL for debugging
+		redisURL := os.Getenv("REDIS_URL")
+		maskedURL := "[not set]"
+		if redisURL != "" {
+			// Mask password: rediss://default:PASSWORD@host:port -> rediss://default:***@host:port
+			if idx := strings.Index(redisURL, "@"); idx != -1 {
+				prefix := redisURL[:strings.Index(redisURL, ":")+3] // "rediss://" or "redis://"
+				suffix := redisURL[idx:]                            // "@host:port"
+				maskedURL = prefix + "***" + suffix
+			} else {
+				maskedURL = "[invalid format]"
+			}
+		}
+
 		client, err := getRedisClient()
 		if err != nil {
-			fmt.Fprintf(w, "<h1>Redis Test Failed</h1><p>Error: %s</p><p><a href=\"/\">Back</a></p>", err)
+			fmt.Fprintf(w, "<h1>Redis Test Failed</h1><p>Error: %s</p><p>URL: <code>%s</code></p><p><a href=\"/\">Back</a></p>", err, maskedURL)
 			return
 		}
 		defer client.Close()
@@ -168,19 +182,20 @@ func main() {
         .success { color: #22c55e; }
         .failed { color: #ef4444; }
         .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; }
+        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; word-break: break-all; }
     </style>
 </head>
 <body>
     <h1>Redis Test Results</h1>
     <div class="card">
+        <p><strong>Connection URL:</strong> <code>%s</code></p>
         <p><strong>Redis Version:</strong> <code>%s</code></p>
         <p><strong>Visit Counter:</strong> <code>%d</code></p>
     </div>
     <div class="card">
         <h2>Operations</h2>
         <ul>
-`, redisVersion, count)
+`, maskedURL, redisVersion, count)
 
 		for _, result := range results {
 			class := "success"

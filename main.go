@@ -104,12 +104,26 @@ func main() {
 		// Get and mask the Redis URL for debugging
 		redisURL := os.Getenv("REDIS_URL")
 		maskedURL := "[not set]"
+		passwordDebug := "[not set]"
 		if redisURL != "" {
 			// Mask password: rediss://default:PASSWORD@host:port -> rediss://default:***@host:port
 			if idx := strings.Index(redisURL, "@"); idx != -1 {
 				prefix := redisURL[:strings.Index(redisURL, ":")+3] // "rediss://" or "redis://"
 				suffix := redisURL[idx:]                            // "@host:port"
 				maskedURL = prefix + "***" + suffix
+
+				// Extract password for debugging (show length and first/last 4 chars)
+				// URL format: rediss://default:PASSWORD@host:port
+				credsPart := redisURL[len(prefix):idx] // "default:PASSWORD"
+				if colonIdx := strings.Index(credsPart, ":"); colonIdx != -1 {
+					password := credsPart[colonIdx+1:]
+					if len(password) > 8 {
+						passwordDebug = fmt.Sprintf("len=%d, starts='%s', ends='%s'",
+							len(password), password[:4], password[len(password)-4:])
+					} else {
+						passwordDebug = fmt.Sprintf("len=%d (too short to show)", len(password))
+					}
+				}
 			} else {
 				maskedURL = "[invalid format]"
 			}
@@ -246,13 +260,14 @@ func main() {
     <h1>Redis Test Results</h1>
     <div class="card">
         <p><strong>Connection URL:</strong> <code>%s</code></p>
+        <p><strong>Password Debug:</strong> <code>%s</code></p>
         <p><strong>Redis Version:</strong> <code>%s</code></p>
         <p><strong>Visit Counter:</strong> <code>%d</code></p>
     </div>
     <div class="card">
         <h2>Operations</h2>
         <ul>
-`, maskedURL, redisVersion, count)
+`, maskedURL, passwordDebug, redisVersion, count)
 
 		for _, result := range results {
 			class := "success"

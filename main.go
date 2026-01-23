@@ -3,10 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -67,11 +65,6 @@ func getRedisClient() (*redis.Client, error) {
 		return nil, fmt.Errorf("failed to parse REDIS_URL: %w", err)
 	}
 
-	// Increase timeouts for debugging
-	opts.DialTimeout = 30 * time.Second
-	opts.ReadTimeout = 30 * time.Second
-	opts.WriteTimeout = 30 * time.Second
-
 	return redis.NewClient(opts), nil
 }
 
@@ -101,92 +94,14 @@ func main() {
 		w.Header().Set("Content-Type", "text/html")
 		ctx := context.Background()
 
-		// Get and mask the Redis URL for debugging
-		redisURL := os.Getenv("REDIS_URL")
-		maskedURL := "[not set]"
-		passwordDebug := "[not set]"
-		if redisURL != "" {
-			// Mask password: rediss://default:PASSWORD@host:port -> rediss://default:***@host:port
-			if idx := strings.Index(redisURL, "@"); idx != -1 {
-				prefix := redisURL[:strings.Index(redisURL, ":")+3] // "rediss://" or "redis://"
-				suffix := redisURL[idx:]                            // "@host:port"
-				maskedURL = prefix + "***" + suffix
-
-				// Extract password for debugging (show length and first/last 4 chars)
-				// URL format: rediss://default:PASSWORD@host:port
-				credsPart := redisURL[len(prefix):idx] // "default:PASSWORD"
-				if colonIdx := strings.Index(credsPart, ":"); colonIdx != -1 {
-					password := credsPart[colonIdx+1:]
-					if len(password) > 8 {
-						passwordDebug = fmt.Sprintf("len=%d, starts='%s', ends='%s'",
-							len(password), password[:4], password[len(password)-4:])
-					} else {
-						passwordDebug = fmt.Sprintf("len=%d (too short to show)", len(password))
-					}
-				}
-			} else {
-				maskedURL = "[invalid format]"
-			}
-		}
-
-		// Extract host:port for diagnostics
-		var host, port string
-		if idx := strings.Index(redisURL, "@"); idx != -1 {
-			hostPort := redisURL[idx+1:]
-			if colonIdx := strings.LastIndex(hostPort, ":"); colonIdx != -1 {
-				host = hostPort[:colonIdx]
-				port = hostPort[colonIdx+1:]
-			}
-		}
-
-		var results []string
-
-		// 0a. DNS Resolution test
-		if host != "" {
-			start := time.Now()
-			addrs, err := net.LookupHost(host)
-			elapsed := time.Since(start)
-			if err != nil {
-				results = append(results, fmt.Sprintf("DNS FAILED (%v): %s", elapsed, err))
-			} else {
-				results = append(results, fmt.Sprintf("DNS SUCCESS (%v): %s -> %v", elapsed, host, addrs))
-			}
-		}
-
-		// 0b. TCP Connection test (without TLS)
-		if host != "" && port != "" {
-			start := time.Now()
-			conn, err := net.DialTimeout("tcp", host+":"+port, 10*time.Second)
-			elapsed := time.Since(start)
-			if err != nil {
-				results = append(results, fmt.Sprintf("TCP FAILED (%v): %s", elapsed, err))
-			} else {
-				conn.Close()
-				results = append(results, fmt.Sprintf("TCP SUCCESS (%v): connected to %s:%s", elapsed, host, port))
-			}
-		}
-
-		// 0c. TLS Handshake test (with SNI)
-		if host != "" && port != "" {
-			start := time.Now()
-			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", host+":"+port, &tls.Config{
-				ServerName: host, // SNI - required by some providers
-			})
-			elapsed := time.Since(start)
-			if err != nil {
-				results = append(results, fmt.Sprintf("TLS FAILED (%v): %s", elapsed, err))
-			} else {
-				conn.Close()
-				results = append(results, fmt.Sprintf("TLS SUCCESS (%v): handshake complete", elapsed))
-			}
-		}
-
 		client, err := getRedisClient()
 		if err != nil {
-			fmt.Fprintf(w, "<h1>Redis Test Failed</h1><p>Error: %s</p><p>URL: <code>%s</code></p><p><a href=\"/\">Back</a></p>", err, maskedURL)
+			fmt.Fprintf(w, "<h1>Redis Test Failed</h1><p>Error: %s</p><p><a href=\"/\">Back</a></p>", err)
 			return
 		}
 		defer client.Close()
+
+		var results []string
 
 		// 1. PING test
 		pong, err := client.Ping(ctx).Result()
@@ -253,21 +168,19 @@ func main() {
         .success { color: #22c55e; }
         .failed { color: #ef4444; }
         .card { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; word-break: break-all; }
+        code { background: #e0e0e0; padding: 2px 6px; border-radius: 4px; }
     </style>
 </head>
 <body>
     <h1>Redis Test Results</h1>
     <div class="card">
-        <p><strong>Connection URL:</strong> <code>%s</code></p>
-        <p><strong>Password Debug:</strong> <code>%s</code></p>
         <p><strong>Redis Version:</strong> <code>%s</code></p>
         <p><strong>Visit Counter:</strong> <code>%d</code></p>
     </div>
     <div class="card">
         <h2>Operations</h2>
         <ul>
-`, maskedURL, passwordDebug, redisVersion, count)
+`, redisVersion, count)
 
 		for _, result := range results {
 			class := "success"
